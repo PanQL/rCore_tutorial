@@ -6,8 +6,10 @@ use crate::memory::memory_set::{
     attr::MemoryAttr, handler::ByFrame, handler::ByFrameWithRpa, MemorySet,
 };
 use alloc::boxed::Box;
+use alloc::sync::Arc;
 use core::str;
 use riscv::register::satp;
+use spin::Mutex;
 use xmas_elf::{
     header,
     program::{Flags, SegmentData, Type},
@@ -26,6 +28,7 @@ pub struct Thread {
     pub context: Context,
     pub kstack: KernelStack,
     pub wait: Option<Tid>,
+    pub vm: Option<Arc<Mutex<MemorySet>>>,
 }
 
 impl Thread {
@@ -42,6 +45,7 @@ impl Thread {
                 context: Context::new_kernel_thread(entry, kstack_.top(), satp::read().bits()),
                 kstack: kstack_,
                 wait: None,
+                vm: None,
             })
         }
     }
@@ -51,6 +55,7 @@ impl Thread {
             context: Context::null(),
             kstack: KernelStack::new_empty(),
             wait: None,
+            vm: None,
         })
     }
 
@@ -99,11 +104,27 @@ impl Thread {
             context: Context::new_user_thread(entry_addr, ustack_top, kstack.top(), vm.token()),
             kstack: kstack,
             wait: wait_thread,
+            vm: Some(Arc::new(Mutex::new(vm))),
+        })
+    }
+
+    /// Fork a new process from current one
+    pub fn fork(&self, tf: &TrapFrame) -> Box<Thread> {
+        let kstack = KernelStack::new();
+        let vm = self.vm.as_ref().unwrap().lock().clone();
+        let vm_token = vm.token();
+        let context = unsafe { Context::new_fork(tf, kstack.top(), vm_token) };
+        Box::new(Thread {
+            context,
+            kstack,
+            wait: self.wait.clone(),
+            vm: Some(Arc::new(Mutex::new(vm))),
         })
     }
 }
 
 pub struct KernelStack(usize);
+
 impl KernelStack {
     pub fn new() -> Self {
         let bottom = unsafe {
